@@ -52,7 +52,7 @@ working_dir = "."       # default working directory for agent tasks
 timeout = 120           # seconds per LLM call
 
 [provider]
-default = "openai"
+default = "google_ai_studio"
 
 [provider.openai]
 api_key_env = "OPENAI_API_KEY"
