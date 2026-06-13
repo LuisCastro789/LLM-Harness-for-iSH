@@ -122,6 +122,15 @@ model = "Qwen/Qwen2.5-72B-Instruct"
 max_tokens = 2048
 temperature = 0.7
 stream = false
+
+[provider.google_ai_studio]
+# Google AI Studio — same Gemini API, separate key env var
+api_key_env = "GOOGLE_AI_STUDIO_KEY"
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+model = "gemini-2.5-flash"
+max_tokens = 8096
+temperature = 0.7
+stream = true
 """
 
 
