@@ -21,12 +21,12 @@ A Gemini-CLI-style terminal application that runs natively inside the [iSH app](
 ╭─ groq · llama-3.3-70b-versatile ──────────────────────────────
 │ I'll list the Python files in your working directory first.
 │
-  ⚙  tool: list_dir
+  ⚙  tool: list-dir
      {
        "path": ".",
        "recursive": false
      }
-  ↳  list_dir result:
+  ↳  list-dir result:
      .:
        app.py   (4.2KB)
        utils.py (1.1KB)
@@ -77,8 +77,8 @@ Download [iSH](https://apps.apple.com/app/ish-shell/id1436902243) from the App S
 ```sh
 # Inside iSH:
 apk add git python3 py3-pip py3-readline
-git clone https://github.com/your-username/ish-harness.git
-cd ish-harness
+git clone https://github.com/LuisCastro789/LLM-Harness-for-iSH.git
+cd LLM-Harness-for-iSH
 sh install.sh
 ```
 
@@ -240,13 +240,13 @@ Set `no_tools = true` for any model that doesn't support the OpenAI `tools` para
 | Tool | What it does |
 |---|---|
 | `shell` | Run any shell command; stdout + stderr returned to the LLM |
-| `read_file` | Read a file (optionally with line range) |
-| `write_file` | Write or append to a file |
+| `read-file` | Read a file (optionally with line range) |
+| `write-file` | Write or append to a file |
 | `grep` | Regex search across files or directories |
-| `list_dir` | List directory contents with sizes |
-| `fetch_url` | HTTP GET a URL and return the text |
+| `list-dir` | List directory contents with sizes |
+| `fetch-url` | HTTP GET a URL and return the text |
 
-Tools that modify the system (`shell`, `write_file`) show a confirmation prompt by default. Set `confirm_shell = false` in config to disable.
+Tools that modify the system (`shell`, `write-file`) show a confirmation prompt by default. Set `confirm_shell = false` in config to disable.
 
 ---
 
