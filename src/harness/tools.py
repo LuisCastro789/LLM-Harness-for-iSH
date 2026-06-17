@@ -1,16 +1,96 @@
 """
-Agent tools available to LLMs inside ish-harness.
-
-Each tool exposes:
-  - schema()    → dict  (OpenAI function-calling / Anthropic tool schema)
-  - run(args)   → str   (result returned to the LLM)
+Agent tools and skills available to LLMs inside ish-harness.
+Compliant with the agentskills.io standard.
 """
 
 import os
 import subprocess
 import shutil
+import yaml
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any, Dict, List
+
+
+# ── skills discovery and parsing ──────────────────────────────────────────────
+
+SKILLS_REGISTRY: Dict[str, Dict[str, Any]] = {}
+
+def parse_skill_file(skill_md_path: Path) -> dict:
+    content = skill_md_path.read_text(encoding="utf-8", errors="replace")
+    if not content.startswith("---"):
+        raise ValueError("Missing opening '---' for YAML frontmatter")
+        
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        raise ValueError("Missing closing '---' for YAML frontmatter")
+        
+    frontmatter_str = parts[1]
+    body = parts[2].strip()
+    
+    try:
+        frontmatter = yaml.safe_load(frontmatter_str)
+    except Exception as e:
+        raise ValueError(f"Malformed YAML frontmatter: {e}")
+        
+    if not isinstance(frontmatter, dict):
+        raise ValueError("Frontmatter is not a dictionary")
+        
+    name = frontmatter.get("name")
+    description = frontmatter.get("description")
+    
+    if not name or not isinstance(name, str):
+        raise ValueError("Missing or invalid 'name' field in frontmatter")
+    if not description or not isinstance(description, str):
+        raise ValueError("Missing or invalid 'description' field in frontmatter")
+        
+    return {
+        "name": name.strip(),
+        "description": description.strip(),
+        "frontmatter": frontmatter,
+        "body": body,
+        "location": skill_md_path,
+        "dir": skill_md_path.parent
+    }
+
+
+def discover_skills(repo_dir: Path, workdir: Path) -> dict[str, dict]:
+    skills = {}
+    scopes = []
+    
+    # 1. Built-in / repo tools
+    built_in_dir = repo_dir / "src" / "tools"
+    if built_in_dir.exists():
+        scopes.append(built_in_dir)
+        
+    # 2. User-level
+    user_dir = Path.home() / ".agents" / "skills"
+    if user_dir.exists():
+        scopes.append(user_dir)
+        
+    # 3. Project-level
+    project_dir = workdir / ".agents" / "skills"
+    if project_dir.exists():
+        scopes.append(project_dir)
+        
+    for scope in scopes:
+        for path in scope.rglob("SKILL.md"):
+            try:
+                skill_info = parse_skill_file(path)
+                name = skill_info["name"]
+                skills[name] = skill_info
+            except Exception:
+                pass
+                
+    return skills
+
+
+def refresh_skills(workdir: Optional[str] = None):
+    global SKILLS_REGISTRY
+    repo_dir = Path(__file__).resolve().parent.parent.parent
+    if not workdir:
+        workdir = os.getcwd()
+    workdir_path = Path(workdir).resolve()
+    SKILLS_REGISTRY = discover_skills(repo_dir, workdir_path)
 
 
 # ── shell exec ────────────────────────────────────────────────────────────────
@@ -65,7 +145,7 @@ class ShellTool:
 # ── file read ─────────────────────────────────────────────────────────────────
 
 class ReadFileTool:
-    name = "read_file"
+    name = "read-file"
     description = "Read the contents of a file. Returns the text content."
 
     def schema(self) -> dict:
@@ -109,7 +189,7 @@ class ReadFileTool:
 # ── file write ────────────────────────────────────────────────────────────────
 
 class WriteFileTool:
-    name = "write_file"
+    name = "write-file"
     description = "Write or overwrite a file with the given content."
 
     def schema(self) -> dict:
@@ -191,7 +271,7 @@ class GrepTool:
 # ── list directory ────────────────────────────────────────────────────────────
 
 class ListDirTool:
-    name = "list_dir"
+    name = "list-dir"
     description = "List files and directories at a given path."
 
     def schema(self) -> dict:
@@ -249,11 +329,11 @@ def _human_size(n: int) -> str:
     return f"{n}TB"
 
 
-# ── fetch URL (lightweight) ───────────────────────────────────────────────────
+# ── fetch URL (BeautifulSoup powered) ─────────────────────────────────────────
 
 class FetchURLTool:
-    name = "fetch_url"
-    description = "Fetch the text content of a URL (GET request). Useful for reading docs or APIs."
+    name = "fetch-url"
+    description = "Fetch the text content of a URL (GET request). Uses BeautifulSoup to clean up HTML."
 
     def schema(self) -> dict:
         return {
@@ -265,7 +345,7 @@ class FetchURLTool:
                     "type": "object",
                     "properties": {
                         "url":       {"type": "string",  "description": "URL to fetch"},
-                        "max_chars": {"type": "integer", "description": "Max characters to return (default 4000)"},
+                        "max_chars": {"type": "integer", "description": "Max characters to return (default 8000)"},
                     },
                     "required": ["url"],
                 },
@@ -274,15 +354,151 @@ class FetchURLTool:
 
     def run(self, args: dict, workdir: Optional[str] = None) -> str:
         import urllib.request
+        import urllib.error
+        import urllib.parse
+        from bs4 import BeautifulSoup
+
         url = args["url"]
-        max_chars = int(args.get("max_chars", 4000))
+        max_chars = int(args.get("max_chars", 8000))
+        
+        # Manual redirect handler to support 308 redirects
+        current_url = url
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        
+        html_content = ""
+        final_url = url
+        is_html = False
+        
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "ish-harness/0.1"})
-            with urllib.request.urlopen(req, timeout=20) as r:
-                content = r.read(max_chars * 2).decode(errors="replace")
-            return content[:max_chars]
+            for _ in range(5):
+                req = urllib.request.Request(current_url, headers=headers)
+                try:
+                    with urllib.request.urlopen(req, timeout=20) as response:
+                        content_bytes = response.read()
+                        charset = response.headers.get_content_charset() or 'utf-8'
+                        html_content = content_bytes.decode(charset, errors='replace')
+                        final_url = response.geturl()
+                        
+                        content_type = response.headers.get("Content-Type", "")
+                        if "html" in content_type.lower() or html_content.strip().startswith("<"):
+                            is_html = True
+                        break
+                except urllib.error.HTTPError as e:
+                    if e.code in (301, 302, 303, 307, 308):
+                        location = e.headers.get("Location")
+                        if not location:
+                            return f"error: HTTP {e.code} redirect without Location header"
+                        current_url = urllib.parse.urljoin(current_url, location)
+                        continue
+                    else:
+                        return f"error: HTTP {e.code} {e.reason}"
+            else:
+                return "error: Too many redirects"
         except Exception as e:
             return f"error: {e}"
+
+        if is_html:
+            try:
+                soup = BeautifulSoup(html_content, 'html.parser')
+                
+                # Remove style, script, head, link, meta, noscript
+                for element in soup(["script", "style", "head", "meta", "link", "noscript"]):
+                    element.decompose()
+                    
+                # Process some basic tags to make them readable
+                for header in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+                    level = int(header.name[1])
+                    header.replace_with(f"\n\n{'#' * level} {header.get_text().strip()}\n")
+                    
+                for p in soup.find_all('p'):
+                    p.replace_with(f"\n\n{p.get_text().strip()}\n")
+                    
+                for li in soup.find_all('li'):
+                    li.replace_with(f"\n* {li.get_text().strip()}")
+                    
+                for a in soup.find_all('a'):
+                    href = a.get('href', '')
+                    text = a.get_text().strip()
+                    if text and href and not href.startswith('#') and not href.startswith('javascript:'):
+                        a.replace_with(f" [{text}]({href}) ")
+                    elif text:
+                        a.replace_with(f" {text} ")
+                        
+                text = soup.get_text()
+                
+                # Clean up multiple newlines and spaces
+                lines = []
+                for line in text.splitlines():
+                    line_str = line.strip()
+                    if line_str:
+                        lines.append(line_str)
+                    else:
+                        if lines and lines[-1] != "":
+                            lines.append("")
+                            
+                cleaned_text = "\n".join(lines).strip()
+                return f"[Fetched from: {final_url}]\n\n" + cleaned_text[:max_chars]
+            except Exception as e:
+                return f"[Fetched from: {final_url} (BeautifulSoup cleanup failed: {e})]\n\n" + html_content[:max_chars]
+        else:
+            return f"[Fetched from: {final_url}]\n\n" + html_content[:max_chars]
+
+
+# ── activate skill tool ───────────────────────────────────────────────────────
+
+class ActivateSkillTool:
+    name = "activate_skill"
+    description = "Load the full instructions and list bundled resources for a specific skill from the catalog."
+
+    def schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The name of the skill to activate",
+                            "enum": list(SKILLS_REGISTRY.keys()) if SKILLS_REGISTRY else ["none"]
+                        }
+                    },
+                    "required": ["name"]
+                }
+            }
+        }
+
+    def run(self, args: dict, workdir: Optional[str] = None) -> str:
+        name = args.get("name")
+        if not name or name not in SKILLS_REGISTRY:
+            return f"error: skill '{name}' not found."
+            
+        skill = SKILLS_REGISTRY[name]
+        body = skill["body"]
+        skill_dir = skill["dir"]
+        
+        # Enumerate bundled resources
+        resources = []
+        for sub in ["scripts", "references", "assets"]:
+            sub_dir = skill_dir / sub
+            if sub_dir.exists() and sub_dir.is_dir():
+                for p in sub_dir.rglob("*"):
+                    if p.is_file():
+                        rel = p.relative_to(skill_dir)
+                        resources.append(f"  {sub}/{rel}")
+                        
+        res_block = ""
+        if resources:
+            res_block = "\n\n### Bundled Resources:\n" + "\n".join(resources)
+            
+        return f"""<skill_content name="{name}">
+{body}{res_block}
+
+Skill directory: {skill_dir}
+Relative paths in this skill are relative to the skill directory.
+</skill_content>"""
 
 
 # ── registry ──────────────────────────────────────────────────────────────────
@@ -294,17 +510,41 @@ ALL_TOOLS = [
     GrepTool(),
     ListDirTool(),
     FetchURLTool(),
+    ActivateSkillTool(),
 ]
 
 TOOL_MAP = {t.name: t for t in ALL_TOOLS}
 
 
 def get_tool_schemas() -> list[dict]:
+    # Refresh skills registry dynamically before returning schemas
+    refresh_skills()
     return [t.schema() for t in ALL_TOOLS]
 
 
 def dispatch_tool(name: str, args: dict, workdir: Optional[str] = None) -> str:
+    # Refresh skills registry dynamically before dispatching
+    refresh_skills(workdir)
     tool = TOOL_MAP.get(name)
     if not tool:
         return f"unknown tool: {name}"
     return tool.run(args, workdir=workdir)
+
+
+def build_skills_catalog() -> str:
+    refresh_skills()
+    if not SKILLS_REGISTRY:
+        return ""
+        
+    lines = [
+        "\n=== AVAILABLE AGENT SKILLS ===",
+        "The following skills provide specialized instructions for specific tasks.",
+        "When a task matches a skill's description, call the activate_skill tool",
+        "with the skill's name to load its full instructions.",
+        ""
+    ]
+    for name, info in SKILLS_REGISTRY.items():
+        desc = info["description"]
+        lines.append(f"- {name}: {desc}")
+        
+    return "\n".join(lines)

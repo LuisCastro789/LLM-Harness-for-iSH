@@ -5,12 +5,14 @@ Drives the agentic tool-use cycle:
   user message → LLM → [tool calls → tool results → LLM] × N → final reply
 """
 
+import os
 import json
 from typing import Callable, Optional
 
 from .config import AgentConfig
 from .providers import BaseProvider, Message, LLMResponse
-from .tools import get_tool_schemas, dispatch_tool, TOOL_MAP
+from .tools import get_tool_schemas, dispatch_tool, TOOL_MAP, build_skills_catalog
+from .memory_store import MemoryStore
 
 
 SYSTEM_PROMPT = """\
@@ -18,7 +20,7 @@ You are a capable, concise agentic assistant running inside ish-harness on an iO
 
 Environment facts:
 - OS: Alpine Linux (musl libc, i686) inside iSH on iOS
-- You have access to a set of tools: shell, read_file, write_file, grep, list_dir, fetch_url
+- You have access to a set of tools: shell, read-file, write-file, grep, list-dir, fetch-url, activate_skill
 - When executing shell commands, prefer commands available in Alpine's busybox/apk ecosystem
 - Be conservative with destructive actions; prefer dry-run flags when available
 - Respond concisely; the terminal has limited screen space
@@ -105,14 +107,39 @@ class AgentLoop:
         tools = get_tool_schemas()
         turn = 0
 
+        # Automatic Memory Recall
+        memories_text = ""
+        try:
+            db_path = os.environ.get("HARNESS_MEMORY_DB") or os.path.expanduser("~/.harness/memory.db")
+            if os.path.exists(db_path):
+                store = MemoryStore(db_path)
+                try:
+                    results = store.search_memories(user_input)
+                    if results:
+                        # Fetch top 3
+                        top_results = results[:3]
+                        memories_lines = ["\n### Relevant Memories:"]
+                        for r in top_results:
+                            memories_lines.append(f"- [{r['wing']}/{r['room']}]: {r['content']}")
+                        memories_text = "\n".join(memories_lines) + "\n"
+                finally:
+                    store.close()
+        except Exception:
+            # Handle cases gracefully when the database does not exist, is empty, or fails
+            pass
+
         while True:
             turn += 1
             self.on_llm_start(turn)
 
+            # Build the dynamic system prompt with the available skills catalog
+            skills_catalog = build_skills_catalog()
+            dynamic_system_prompt = SYSTEM_PROMPT + memories_text + skills_catalog
+
             try:
                 response: LLMResponse = sess.provider.chat(
                     messages=sess.history,
-                    system=SYSTEM_PROMPT,
+                    system=dynamic_system_prompt,
                     tools=tools if sess.cfg.max_tool_calls > 0 else None,
                     stream_cb=self.on_token,
                 )
@@ -148,36 +175,52 @@ class AgentLoop:
                 self.on_tool_call(fn_name, fn_args)
 
                 # Confirmation gate for destructive tools
-                if fn_name in ("shell", "write_file"):
-                    if cfg.confirm_shell and not self.on_confirm(fn_name, fn_args):
-                        result = "[harness] user declined tool execution"
-                        self.on_tool_result(fn_name, result)
-                        sess.append_tool_result(fn_name, result, call_id)
-                        continue
+                allowed = True
+                if fn_name == "shell" and cfg.confirm_shell:
+                    allowed = self.on_confirm(fn_name, fn_args)
+                elif fn_name == "write-file" and cfg.confirm_file_write:
+                    allowed = self.on_confirm(fn_name, fn_args)
 
-                sess.tool_call_count += 1
-                result = dispatch_tool(fn_name, fn_args, workdir=cfg.working_dir)
+                if not allowed:
+                    result = "error: tool execution cancelled by user"
+                else:
+                    try:
+                        result = dispatch_tool(fn_name, fn_args, workdir=cfg.working_dir)
+                    except Exception as e:
+                        result = f"error: {e}"
+
                 self.on_tool_result(fn_name, result)
                 sess.append_tool_result(fn_name, result, call_id)
+                sess.tool_call_count += 1
 
-            # Loop back → LLM processes tool results
 
-
-def _parse_tool_call(tc: dict) -> tuple:
-    """Normalise a tool_call dict from OpenAI or Anthropic into (id, name, args)."""
-    # OpenAI format: {"id": ..., "type": "function", "function": {"name": ..., "arguments": "..."}}
-    if "function" in tc:
-        fn = tc["function"]
-        name = fn.get("name")
-        raw_args = fn.get("arguments", "{}")
+def _parse_tool_call(tc) -> tuple[Optional[str], Optional[str], dict]:
+    """Parse tool call into (call_id, name, args) across different providers."""
+    # OpenAI / Groq / Gemini / Ollama format
+    if hasattr(tc, "id") and hasattr(tc, "function"):
+        call_id = tc.id
+        name = tc.function.name
         try:
-            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-        except json.JSONDecodeError:
+            args = json.loads(tc.function.arguments) if isinstance(tc.function.arguments, str) else tc.function.arguments
+        except Exception:
             args = {}
-        return tc.get("id", ""), name, args
+        return call_id, name, args
 
-    # Anthropic format: {"type": "tool_use", "id": ..., "name": ..., "input": {...}}
-    if tc.get("type") == "tool_use":
-        return tc.get("id", ""), tc.get("name"), tc.get("input", {})
+    # Anthropic format
+    if isinstance(tc, dict) and "id" in tc and "name" in tc:
+        return tc["id"], tc["name"], tc.get("input", {})
 
-    return "", None, {}
+    # Dictionary format fallback
+    if isinstance(tc, dict) and "function" in tc:
+        fn = tc["function"]
+        call_id = tc.get("id")
+        name = fn.get("name")
+        args = fn.get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except Exception:
+                args = {}
+        return call_id, name, args
+
+    return None, None, {}
