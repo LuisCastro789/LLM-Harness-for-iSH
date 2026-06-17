@@ -35,6 +35,14 @@ else
     apk add --no-cache py3-readline 2>/dev/null || true
 fi
 
+# ── PyYAML (needed for parsing skill frontmatter) ───────────────────────────
+if python3 -c "import yaml" 2>/dev/null; then
+    echo "✓  PyYAML available"
+else
+    echo "  PyYAML not found — installing py3-yaml..."
+    apk add --no-cache py3-yaml 2>/dev/null || true
+fi
+
 # ── tomli backport (needed on Python < 3.11) ─────────────────────────────────
 PY_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)")
 PY_MAJOR=$(python3 -c "import sys; print(sys.version_info.major)")

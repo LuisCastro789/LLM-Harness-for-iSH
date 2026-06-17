@@ -23,6 +23,7 @@ classifiers = [
 # Pure stdlib on 3.11+; needs tomli backport on 3.10
 dependencies = [
     "tomli>=1.1.0; python_version < '3.11'",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
