@@ -43,6 +43,7 @@ A Gemini-CLI-style terminal application that runs natively inside the [iSH app](
 
 - **Multi-provider** — OpenAI, Anthropic, Google Gemini, Google Gemma (HuggingFace), Groq, Ollama, any OpenAI-compatible endpoint
 - **Agentic tool loop** — shell execution, file read/write, grep, directory listing, URL fetch; the LLM calls tools automatically until the task is done
+- **Local-first Memory System (iSH-Memory)** — Hierarchical memory storage (wing/room/drawer) with SQLite + FTS5 full-text indexing, BM25 relevance ranking, and automatic context recall (the top 3 memories are automatically recalled and injected into the LLM prompt)
 - **iSH-native** — pure Python stdlib, zero C extensions, zero external runtime deps; installs on Alpine i686 (musl libc) with a single command
 - **Python 3.10+ compatible** — works on iSH's default Python (3.10)
 - **Rich TUI** — box-drawing borders, streaming tokens, spinner, themes (dark / light / monokai / solarized), all via plain ANSI codes
@@ -235,7 +236,11 @@ Set `no_tools = true` for any model that doesn't support the OpenAI `tools` para
 
 ---
 
-## Agent Tools
+## Agent Tools & Skills
+
+The harness supports both built-in core tools and dynamically discovered, modular **Agent Skills** (following the `agentskills.io` standard).
+
+### Built-in Core Tools
 
 | Tool | What it does |
 |---|---|
@@ -244,9 +249,59 @@ Set `no_tools = true` for any model that doesn't support the OpenAI `tools` para
 | `write-file` | Write or append to a file |
 | `grep` | Regex search across files or directories |
 | `list-dir` | List directory contents with sizes |
-| `fetch-url` | HTTP GET a URL and return the text |
+| `fetch-url` | HTTP GET a URL and return clean text content |
 
 Tools that modify the system (`shell`, `write-file`) show a confirmation prompt by default. Set `confirm_shell = false` in config to disable.
+
+### Custom Agent Skills
+
+Custom skills are dynamically loaded on-demand via the `activate_skill` tool, which exposes full instructions and bundled resources to the LLM as needed, conserving context window space.
+
+| Skill | Description |
+|---|---|
+| `ish-memory` | Local-first hierarchical memory storage, search, and recall. |
+| `pdf-creator` | Generate clean PDF documents from raw text content. |
+| `pdf-manager` | Inspect, analyze, and split PDF documents. |
+
+---
+
+## iSH-Memory (Local-First AI Memory)
+
+iSH-Memory is a highly optimized, resource-efficient local memory system designed specifically for the resource-constrained emulated environment of iSH. It runs entirely on device, requiring **zero** external vector databases, APIs, or heavy runtime dependencies.
+
+### Architecture & Hierarchy
+Memories are organized hierarchically (inspired by the MemPalace design) to allow highly targeted retrieval:
+* **Wing**: High-level scope or context (e.g., `user`, `project`, `system`).
+* **Room**: A specific topic, task, or area of interest (e.g., `git`, `python`, `deployment`).
+* **Content (Drawer)**: The verbatim text snippet, conversation segment, or structured facts.
+
+### Key Features
+1. **SQLite + FTS5 Storage**: Uses native SQLite with Full-Text Search (FTS5) for fast keyword indexing. Database triggers automatically synchronize the FTS5 index on every insert, update, or delete.
+2. **BM25 Relevance Ranking**: Uses a lightweight, pure-Python BM25 relevance ranking algorithm to sort matching memories by semantic relevance.
+3. **Automatic Context Recall**: On every user input, the harness automatically queries the `MemoryStore` for the top 3 relevant memories and injects them directly into the dynamic system prompt.
+4. **CLI Interface**: Perform manual memory management via the command line.
+
+### CLI Usage
+The memory CLI is located at `src/tools/custom_tools/ish-memory/scripts/memory_cli.py`.
+
+* **Add a memory**:
+  ```sh
+  python3 src/tools/custom_tools/ish-memory/scripts/memory_cli.py add "SQLite triggers automatically sync FTS5 virtual tables." --wing development --room sqlite --metadata '{"author": "assistant"}'
+  ```
+* **Search memories**:
+  ```sh
+  python3 src/tools/custom_tools/ish-memory/scripts/memory_cli.py search "FTS5 triggers" --wing development
+  ```
+* **Get a memory by ID**:
+  ```sh
+  python3 src/tools/custom_tools/ish-memory/scripts/memory_cli.py get 1
+  ```
+* **Delete a memory by ID**:
+  ```sh
+  python3 src/tools/custom_tools/ish-memory/scripts/memory_cli.py delete 1
+  ```
+
+*Note: By default, the CLI uses the production database path `~/.harness/memory.db`. You can override this using the `--db <path>` option or the `HARNESS_MEMORY_DB` environment variable.*
 
 ---
 
@@ -260,14 +315,25 @@ ish-harness/
 │   ├── app.py            main REPL loop
 │   ├── agent.py          agentic tool-call loop
 │   ├── config.py         TOML config + defaults
+│   ├── memory_store.py   SQLite + FTS5 database manager & BM25 ranker
 │   ├── providers.py      OpenAI / Anthropic / Gemini / HF / Groq adapters
-│   ├── tools.py          shell, file, grep, list, fetch tools
+│   ├── tools.py          shell, file, grep, list, fetch tools, skill discovery
 │   ├── renderer.py       ANSI TUI renderer
 │   ├── themes.py         dark / light / monokai / solarized
 │   ├── sessions.py       JSON session persistence
 │   └── history.py        readline integration
+├── src/tools/custom_tools/
+│   ├── ish-memory/       iSH-Memory agentskills.io skill
+│   │   ├── SKILL.md      Skill metadata and documentation
+│   │   └── scripts/
+│   │       └── memory_cli.py  Memory command line interface
+│   ├── pdf_creator/      PDF Creator skill
+│   └── pdf_manager/      PDF Manager skill
 ├── tests/
-│   └── test_harness.py
+│   ├── test_harness.py
+│   ├── test_memory_store.py
+│   ├── test_memory_cli.py
+│   └── test_memory_integration.py
 ├── install.sh            iSH bootstrap script
 ├── pyproject.toml
 ├── setup.py
